@@ -1,5 +1,4 @@
 Flask
-pytesseract
 Pillow
-requests
 geopy
+gunicorn
