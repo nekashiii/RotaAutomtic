@@ -1,106 +1,71 @@
-import base64
 import os
-import json
+import base64
 from openai import OpenAI
 
-client = OpenAI()
-
-
-def _guess_mime(path: str) -> str:
-    ext = os.path.splitext(path.lower())[1]
-    if ext in [".jpg", ".jpeg"]:
-        return "image/jpeg"
-    if ext == ".png":
-        return "image/png"
-    if ext == ".webp":
-        return "image/webp"
-    # fallback seguro
-    return "image/jpeg"
-
-
-def _to_data_url(path: str) -> str:
-    mime = _guess_mime(path)
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
-
-
-def _parse_json_loose(txt: str):
-    if not txt:
-        return None
-    txt = txt.strip().replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        # tenta extrair o primeiro JSON no meio do texto
-        a = txt.find("{")
-        b = txt.rfind("}")
-        if a != -1 and b != -1 and b > a:
-            try:
-                return json.loads(txt[a:b + 1])
-            except Exception:
-                return None
-    return None
-
-
-def extrair_cep_da_imagem(caminho_img: str) -> str | None:
+def _get_client() -> OpenAI:
     """
-    Retorna uma string pronta pro Google Maps no formato:
-    "LOGRADOURO, NUMERO - BAIRRO, SAO PAULO, SP"
-    ou None.
+    Cria o client somente quando necessário.
+    Isso evita quebrar o deploy no Render quando a OPENAI_API_KEY ainda não está setada.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY não está definida no ambiente.")
+    return OpenAI(api_key=api_key)
+
+
+def extrair_cep_da_imagem(caminho_imagem: str) -> str | None:
+    """
+    Lê a imagem e pede pra IA retornar SOMENTE:
+    'RUA X, nºY - BAIRRO, CIDADE, UF'
+    ou None se falhar.
     """
     try:
-        data_url = _to_data_url(caminho_img)
+        client = _get_client()
 
-        prompt = """
-Você vai receber uma foto de uma guia de coleta (ordem de coleta).
+        with open(caminho_imagem, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-Tarefa:
-- Encontre o campo "Endereço Coleta" (pode aparecer como "Endereco Coleta").
-- Extraia APENAS:
-  1) logradouro + número
-  2) bairro (linha logo abaixo)
-
-Responda SOMENTE em JSON neste formato:
-{
-  "logradouro_numero": "RUA GANGES, 635",
-  "bairro": "VILA CARRAO"
-}
-
-Regras:
-- Ignore CNPJ, telefone, datas, destinatário, CEP, cidade/UF.
-- Se não encontrar com segurança, responda: null
-"""
+        prompt = (
+            "Você vai ler uma guia 'ORDEM DE COLETA'.\n"
+            "Retorne APENAS o ENDEREÇO DE COLETA (logradouro + número) e o BAIRRO.\n"
+            "Formate assim exatamente:\n"
+            "RUA ..., nº... - BAIRRO, SAO PAULO, SP\n\n"
+            "Regras:\n"
+            "- NÃO escreva mais nada.\n"
+            "- NÃO inclua CEP.\n"
+            "- NÃO inclua 'Endereço Coleta' no texto.\n"
+            "- Se não achar, retorne vazio.\n"
+        )
 
         resp = client.responses.create(
             model="gpt-4.1-mini",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    # ✅ formato correto: input_image com image_url (data URL)
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            }],
-            temperature=0,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{img_b64}",
+                        },
+                    ],
+                }
+            ],
         )
 
-        txt = (resp.output_text or "").strip()
-        if not txt or txt.lower() == "null":
+        texto = (resp.output_text or "").strip()
+
+        if not texto:
             return None
 
-        obj = _parse_json_loose(txt)
-        if not obj:
+        # garante que retorna só uma linha
+        texto = texto.splitlines()[0].strip()
+
+        # evita retornos esquisitos
+        if len(texto) < 8:
             return None
 
-        logradouro_numero = (obj.get("logradouro_numero") or "").strip()
-        bairro = (obj.get("bairro") or "").strip()
-
-        if len(logradouro_numero) < 6 or len(bairro) < 3:
-            return None
-
-        # ✅ pronto pro Maps (você já limita pra SP no geocoder depois)
-        return f"{logradouro_numero} - {bairro}, SAO PAULO, SP"
+        return texto
 
     except Exception as e:
         print("❌ Erro IA (ai_service):", e)
