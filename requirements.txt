@@ -1,5 +1,0 @@
-Flask
-Pillow
-geopy
-gunicorn
-openai
